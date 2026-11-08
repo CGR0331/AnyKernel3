@@ -15,7 +15,7 @@ echo "KERNEL_ROOT = $KERNEL_ROOT"
 if [ -d "$KSU_DIR/kernel" ]; then
   BEFORE=$(grep -rE '\b(pr_info|pr_warn|pr_alert)\(' "$KSU_DIR/kernel" --include='*.c' --include='*.h' | wc -l)
   find "$KSU_DIR/kernel" -type f \( -name '*.c' -o -name '*.h' \) \
-    -exec sed -i -E 's/\bpr_info\(/pr_debug(/g; s/\bpr_warn\(/pr_debug(/g; s/\bpr_alert\(/pr_debug(/g' {} +
+    -exec sed -i -E 's/\bpr_info\(/pr_debug(/g; s/\bpr_warn\(/pr_debug(/g; s/\bpr_warn_once\(/pr_debug(/g; s/\bpr_alert\(/pr_debug(/g; s/\bpr_err\(/pr_debug(/g; s/\bpr_crit\(/pr_debug(/g; s/\bpr_emerg\(/pr_debug(/g; s/\bpr_notice\(/pr_debug(/g; s/\bpr_cont\(/pr_debug(/g' {} +
   AFTER=$(grep -rE '\b(pr_info|pr_warn|pr_alert)\(' "$KSU_DIR/kernel" --include='*.c' --include='*.h' | wc -l)
   echo "KernelSU 日志调用点: $BEFORE -> $AFTER"
 else
