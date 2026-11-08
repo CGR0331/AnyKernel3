@@ -3,24 +3,31 @@
 # v2.1：修正关闭 SUSFS 日志分支后 SUSFS_LOGI_RL / SUSFS_LOGE_RL 未定义导致的编译错误
 set -u
 
-KSU_DIR="${KSU_DIR:-${GITHUB_WORKSPACE:-$(pwd)}/KernelSU}"
 KERNEL_ROOT="${KERNEL_ROOT:-$(pwd)}"
 COMMON="$KERNEL_ROOT/common"
 DEFCONFIG="${DEFCONFIG:-$COMMON/arch/arm64/configs/gki_defconfig}"
 
+WORKSPACE="${GITHUB_WORKSPACE:-$(pwd)}"
+KSU_SRC=""
+for d in "$WORKSPACE/KernelSU" "$KERNEL_ROOT/KernelSU" "$KERNEL_ROOT/common/drivers/kernelsu" "$KERNEL_ROOT/drivers/kernelsu"; do
+  [ -d "$d" ] || continue
+  if [ -d "$d/kernel" ]; then KSU_SRC="$d/kernel"; break; fi
+  if [ -f "$d/Kbuild" ] || [ -f "$d/Makefile" ]; then KSU_SRC="$d"; break; fi
+done
+
 echo "::group::隐藏 root 相关内核日志"
 
-if [ -d "$KSU_DIR/kernel" ]; then
-  BEFORE=$(grep -rE '\b(pr_info|pr_warn|pr_warn_once|pr_alert|pr_err|pr_crit|pr_emerg|pr_notice|pr_cont)\(' "$KSU_DIR/kernel" --include='*.c' --include='*.h' | wc -l)
+if [ -n "$KSU_SRC" ]; then
+  BEFORE=$(grep -rE '\b(pr_info|pr_warn|pr_warn_once|pr_alert|pr_err|pr_crit|pr_emerg|pr_notice|pr_cont)\(' "$KSU_SRC" --include='*.c' --include='*.h' | wc -l)
   SED_EXPR='s/\bpr_info\(/pr_debug(/g; s/\bpr_warn\(/pr_debug(/g; s/\bpr_warn_once\(/pr_debug(/g; s/\bpr_alert\(/pr_debug(/g; s/\bpr_err\(/pr_debug(/g; s/\bpr_crit\(/pr_debug(/g; s/\bpr_emerg\(/pr_debug(/g; s/\bpr_notice\(/pr_debug(/g; s/\bpr_cont\(/pr_debug(/g'
-  find "$KSU_DIR/kernel" -type f \( -name '*.c' -o -name '*.h' \) -exec sed -i -E "$SED_EXPR" {} +
-  AFTER=$(grep -rE '\b(pr_info|pr_warn|pr_warn_once|pr_alert)\(' "$KSU_DIR/kernel" --include='*.c' --include='*.h' | wc -l)
+  find "$KSU_SRC" -type f \( -name '*.c' -o -name '*.h' \) -exec sed -i -E "$SED_EXPR" {} +
+  AFTER=$(grep -rE '\b(pr_info|pr_warn|pr_warn_once|pr_alert)\(' "$KSU_SRC" --include='*.c' --include='*.h' | wc -l)
   echo "KernelSU 日志调用点: $BEFORE -> 剩余 info/warn/alert $AFTER"
 else
-  echo "::warning title=hide_root_logs::未找到 $KSU_DIR/kernel"
+  echo "::warning title=hide_root_logs::未找到 KernelSU 源码目录"
 fi
 
-KLOG="$KSU_DIR/kernel/include/klog.h"
+KLOG=$(find "$WORKSPACE/KernelSU" "$KERNEL_ROOT/common/drivers/kernelsu" "$KERNEL_ROOT/KernelSU" -name klog.h 2>/dev/null | head -1)
 if [ -f "$KLOG" ]; then
   sed -i -E 's|^([[:space:]]*)#define[[:space:]]+pr_fmt\(fmt\)[[:space:]]+"KernelSU: "[[:space:]]*fmt[[:space:]]*$|\1#define pr_fmt(fmt) fmt|' "$KLOG"
   echo "已处理 pr_fmt"
