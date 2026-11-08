@@ -741,6 +741,10 @@ jobs:
           OS_PATCH_LEVEL: ${{ inputs.os_patch_level }}
           SUB_LEVEL: ${{ inputs.sub_level }}
         run: bash "$GITHUB_WORKSPACE/scripts/susfs_fixes/apply.sh"
+
+      - name: 隐藏 root 相关内核日志
+        working-directory: ${{ env.KERNEL_ROOT }}
+        run: bash "$GITHUB_WORKSPACE/scripts/hide_root_logs.sh"
           
       - name: 克隆 Droidspaces 补丁仓库
         if: inputs.droidspaces != 'off'
@@ -1648,7 +1652,7 @@ jobs:
           CONFIG_KSU_SUSFS_SUS_MOUNT=y
           CONFIG_KSU_SUSFS_SUS_KSTAT=y
           CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-          CONFIG_KSU_SUSFS_ENABLE_LOG=y
+          # CONFIG_KSU_SUSFS_ENABLE_LOG is not set
           CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
           CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
           CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
