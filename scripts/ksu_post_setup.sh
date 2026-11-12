@@ -67,3 +67,43 @@ case "$MODE" in
     ;;
   *) echo "未知模式: $MODE" >&2; exit 1 ;;
 esac
+
+# ============================================================
+# 隐藏 KernelSU 内核符号（防止 /proc/kallsyms 暴露 ksu 字样）
+# 由用户追加：把 setup_ksu_cred / is_task_ksu_domain / anon_ksu_*
+# 等符号统一改名为 kx7a3 前缀，并对 Kbuild 的 MODULE_NAME 改名。
+# ============================================================
+hide_ksu_symbols() {
+    local kdir=""
+    if [ -d "$KSU_DIR/kernel" ]; then
+        kdir="$KSU_DIR/kernel"
+    elif [ -d "$KSU_DIR" ]; then
+        kdir="$KSU_DIR"
+    else
+        echo "[hide_ksu_symbols] KSU dir not found, skip"
+        return 0
+    fi
+
+    local n=0
+    while IFS= read -r -d '' f; do
+        sed -i \
+            -e 's/\bsetup_ksu_cred\b/setup_kx7a3_cred/g' \
+            -e 's/\bis_task_ksu_domain\b/is_task_kx7a3_domain/g' \
+            -e 's/\banon_ksu_ioctl\b/anon_kx7a3_ioctl/g' \
+            -e 's/\banon_ksu_release\b/anon_kx7a3_release/g' \
+            -e 's/\banon_ksu_fops\b/anon_kx7a3_fops/g' \
+            "$f" 2>/dev/null || true
+        n=$((n + 1))
+    done < <(find "$kdir" -type f \( -name '*.c' -o -name '*.h' -o -name '*.S' -o -name 'Kbuild' -o -name 'Makefile' \) -print0 2>/dev/null)
+
+    # 模块名（决定 __initstub__kmod_ksu_xxx_kernelsu_init 这条符号）
+    while IFS= read -r -d '' kb; do
+        sed -i -E 's/^MODULE_NAME[[:space:]]*:=[[:space:]]*(ksu|kernelsu|sukisu|bakasu|finasu)[[:space:]]*$/MODULE_NAME := kx7a3/' "$kb" 2>/dev/null || true
+    done < <(find "$KSU_DIR" -type f -name 'Kbuild' -print0 2>/dev/null)
+
+    echo "[hide_ksu_symbols] scanned $n files, MODULE_NAME -> kx7a3"
+}
+
+set +e
+hide_ksu_symbols
+set -e
