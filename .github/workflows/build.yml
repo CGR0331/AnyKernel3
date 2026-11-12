@@ -85,6 +85,10 @@ on:
         required: false
         type: boolean
         default: false
+      use_nomount:
+        required: false
+        type: boolean
+        default: false
       cve_2026_43499_patch:
         required: false
         type: boolean
@@ -93,6 +97,10 @@ on:
         required: true
         type: boolean
         default: true
+      ksu_mode:
+        required: false
+        type: string
+        default: "关闭"
       supp_op:
         required: false
         type: boolean
@@ -118,7 +126,7 @@ on:
 jobs:
   build-kernel:
     name: "${{ inputs.kernel_version }}.${{ inputs.display_sub || inputs.sub_level }}-${{ inputs.android_version }}-${{ inputs.os_patch_level }}-${{ inputs.ksu_variant }}"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # repo sync 重试（3 x 20 分钟）+ 完整构建需要 60 分钟以上的余量
     timeout-minutes: 90
 
@@ -146,6 +154,7 @@ jobs:
           echo "BBG 补丁      : ${{ inputs.use_bbg }}"
           echo "网络增强      : ${{ inputs.use_net_enhance }}"
           echo "KPM 功能      : ${{ inputs.use_kpm && '开启' || '关闭' }}"
+          echo "NoMount 元模块: ${{ inputs.use_nomount && '开启' || '关闭' }}"
           echo "Re-Kernel     : ${{ inputs.use_rekernel }}"
           echo "CVE-2026-43499: ${{ inputs.cve_2026_43499_patch }}"
           echo "Droidspaces   : ${{ inputs.droidspaces }}"
@@ -378,7 +387,8 @@ jobs:
               SYNC_OK=true
               break
             fi
-            echo "::warning title=repo sync 重试::第 ${SYNC_ATTEMPT}/3 次同步失败或超时，清理残留 git 进程后重试"
+            # 可恢复的重试只写日志；连续三次失败仍由下方 error 注解报告
+            echo "repo sync 重试：第 ${SYNC_ATTEMPT}/3 次同步失败或超时，清理残留 git 进程后重试"
             pkill -9 -f 'git-remote-https' 2>/dev/null || true
             pkill -9 -f 'android\.googlesource\.com' 2>/dev/null || true
             sleep 10
@@ -388,21 +398,20 @@ jobs:
             exit 1
           fi
 
-          # 完整性守卫：repo sync 断点续传偶发留下检出不完整的项目（如 clang 工具链
-          # 项目缺少 kleaf/BUILD.bazel），bazel 加载阶段会报
-          # "Every .bzl file must have a corresponding package" 而失败；检测到时
-          # 强制重新同步该项目
-          for CHECK_PATH in \
-            prebuilts/clang/host/linux-x86/kleaf/clang_toolchain_repository.bzl \
-            build/kernel/kleaf/common_kernels.bzl; do
-            DIR_PATH="${CHECK_PATH%/*}"
-            if [ -e "$DIR_PATH" ] && [ ! -f "$CHECK_PATH" ]; then
-              PROJECT_DIR="${DIR_PATH%/kleaf}"
-              if [ -d ".repo/projects" ]; then
-                echo "::warning title=repo sync 完整性守卫::$DIR_PATH 存在但缺少 $(basename "$CHECK_PATH")，重新同步 $PROJECT_DIR"
-                timeout --kill-after=30 20m $REPO sync -c --force-sync --fail-fast "$PROJECT_DIR" \
-                  || echo "::warning title=repo sync 完整性守卫::重同步 $PROJECT_DIR 失败，继续构建"
-              fi
+          # 完整性守卫：repo sync 断点续传偶发留下检出不完整的项目，表现为目录里
+          # 只剩零散文件、缺 BUILD 文件，bazel 加载阶段会报
+          # "Every .bzl file must have a corresponding package"。
+          # 只校验 kleaf/BUILD.bazel（Bazel 包标识）：kleaf 目录存在却无 BUILD 文件
+          # 一定意味着检出不完整。不要校验具体的 .bzl 文件——旧分支（如 6.1 用的
+          # main-kernel-build-2023）kleaf 目录本就不含较晚才加入的脚本，会误报。
+          for KLEAF_DIR in \
+            prebuilts/clang/host/linux-x86/kleaf \
+            build/kernel/kleaf; do
+            if [ -d "$KLEAF_DIR" ] && [ ! -f "$KLEAF_DIR/BUILD.bazel" ]; then
+              PROJECT_DIR="${KLEAF_DIR%/kleaf}"
+              echo "::warning title=repo sync 完整性守卫::$KLEAF_DIR 缺少 BUILD.bazel，检出不完整，重新同步 $PROJECT_DIR"
+              timeout --kill-after=30 20m $REPO sync -c --force-sync --fail-fast "$PROJECT_DIR" \
+                || echo "::warning title=repo sync 完整性守卫::重同步 $PROJECT_DIR 失败，继续构建"
             fi
           done
 
@@ -483,6 +492,7 @@ jobs:
 
       - name: 确定 KernelSU 分支
         id: ksu-branch
+        if: inputs.ksu_mode != '禁用KSU'
         run: |
           variant_input="${{ inputs.ksu_variant }}"
 
@@ -523,6 +533,7 @@ jobs:
           echo "KSU 分支: $BRANCH"
 
       - name: 添加 KernelSU
+        if: inputs.ksu_mode != '禁用KSU'
         working-directory: ${{ env.KERNEL_ROOT }}
         env:
           KSU_COMMIT: ${{ inputs.ksu_commit }}
@@ -694,7 +705,9 @@ jobs:
               esac
             fi
           fi
-          if [ -n "$KSU_VERSION" ]; then
+          if [ "${{ inputs.ksu_mode }}" = "禁用KSU" ]; then
+            AK3_NAME="KSU-free-${CONFIG}"
+          elif [ -n "$KSU_VERSION" ]; then
             AK3_NAME="${{ inputs.ksu_variant }}-${KSU_VERSION}-${CONFIG}"
           else
             AK3_NAME="${{ inputs.ksu_variant }}_kernel-${CONFIG}"
@@ -717,7 +730,7 @@ jobs:
       # 注入 LOOKUP_SYMBOLS 处理器 + symbol_resolver 内核侧能力；
       # 上游 builtin 自行同步后自动跳过，详见 scripts/ksu_uapi_sync/sync_uapi.sh
       - name: 同步 SukiSU 内核 UAPI 版本（对齐官方管理器）
-        if: inputs.ksu_variant == 'SukiSU'
+        if: inputs.ksu_variant == 'SukiSU' && inputs.ksu_mode != '禁用KSU'
         working-directory: ${{ env.KERNEL_ROOT }}
         run: bash "$GITHUB_WORKSPACE/scripts/ksu_uapi_sync/sync_uapi.sh" KernelSU
 
@@ -727,7 +740,7 @@ jobs:
       # 补丁内部以 LINUX_VERSION_CODE 守卫，6.7 及以下内核行为不变，
       # SukiSU 上游修复后按内容检测自动跳过。
       - name: 应用 SukiSU 内核 API 兼容补丁 (6.8+ lsm_id)
-        if: inputs.ksu_variant == 'SukiSU'
+        if: inputs.ksu_variant == 'SukiSU' && inputs.ksu_mode != '禁用KSU'
         working-directory: ${{ env.KERNEL_ROOT }}
         run: bash "$GITHUB_WORKSPACE/scripts/sukisu_compat/apply.sh" KernelSU
 
@@ -741,10 +754,6 @@ jobs:
           OS_PATCH_LEVEL: ${{ inputs.os_patch_level }}
           SUB_LEVEL: ${{ inputs.sub_level }}
         run: bash "$GITHUB_WORKSPACE/scripts/susfs_fixes/apply.sh"
-
-      - name: 隐藏 root 相关内核日志
-        working-directory: ${{ env.KERNEL_ROOT }}
-        run: bash "$GITHUB_WORKSPACE/scripts/hide_root_logs.sh"
           
       - name: 克隆 Droidspaces 补丁仓库
         if: inputs.droidspaces != 'off'
@@ -765,6 +774,49 @@ jobs:
 
       - name: 备份基准 defconfig
         run: cp "$DEFCONFIG" "$DEFCONFIG.orig"
+
+      - name: 集成 NoMount 挂载元模块
+        if: inputs.use_nomount
+        working-directory: ${{ env.KERNEL_ROOT }}/common
+        run: |
+          # NoMount 在 fs/ 层注册子系统，不依赖传统挂载点，可与任意 KSU 变体及 SUSFS 共存。
+          # 必须在「备份基准 defconfig」之后追加 CONFIG_NOMOUNT，6.1+ 的 bazel fragment 才能捕获。
+          set -euo pipefail
+          NOMOUNT_SETUP_URL="https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh"
+
+          nomount_cleanup() {
+            curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors "$NOMOUNT_SETUP_URL" \
+              | bash -s -- --cleanup >/dev/null 2>&1 || true
+          }
+          nomount_fail() {
+            nomount_cleanup
+            if [ "$SKIP_INCOMPATIBLE" = "true" ]; then
+              echo "::warning title=NoMount 已跳过::$1，已跳过 NoMount 元模块集成"
+              if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+                echo "" >> "$GITHUB_STEP_SUMMARY"
+                echo "> ⏭️ **NoMount 元模块** 已自动跳过：$1（构建未中断）" >> "$GITHUB_STEP_SUMMARY"
+              fi
+              echo "NOMOUNT_SKIPPED=true" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            echo "::error::$1"
+            exit 1
+          }
+
+          echo "拉取并执行 NoMount 上游集成脚本 (dev)..."
+          if ! curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors "$NOMOUNT_SETUP_URL" | bash -s -- dev; then
+            nomount_fail "NoMount 集成脚本执行失败"
+          fi
+          [ -L "fs/nomount" ] || nomount_fail "NoMount 集成后 fs/nomount 软链接缺失"
+          grep -q 'source "fs/nomount/Kconfig"' fs/Kconfig || nomount_fail "NoMount 集成后 fs/Kconfig 未注册"
+          echo "NoMount 集成完成，commit: $(git -C NoMount rev-parse HEAD)"
+
+          if ! grep -q '^CONFIG_NOMOUNT=y' "$DEFCONFIG"; then
+            echo "CONFIG_NOMOUNT=y" >> "$DEFCONFIG"
+            echo "已启用 CONFIG_NOMOUNT=y"
+          else
+            echo "CONFIG_NOMOUNT=y 已存在，跳过"
+          fi
 
       - name: 集成 Droidspaces 支持
         if: inputs.droidspaces != 'off' && env.DROIDSPACES_SKIPPED != 'true'
@@ -1573,15 +1625,19 @@ jobs:
         working-directory: ${{ env.KERNEL_ROOT }}
         run: |
           cat >> "$DEFCONFIG" << 'EOF'
-          CONFIG_KSU=y
           CONFIG_KALLSYMS_ALL=y
           CONFIG_TMPFS_XATTR=y
           CONFIG_TMPFS_POSIX_ACL=y
           EOF
 
+          # 禁用 KSU 时源码里没有 KernelSU，CONFIG_KSU 会被 bazel defconfig 校验拒绝
+          if [ "${{ inputs.ksu_mode }}" != "禁用KSU" ]; then
+            echo "CONFIG_KSU=y" >> "$DEFCONFIG"
+          fi
+
           # BakaSU 上游改名后 Kconfig 默认值去掉了 @%REPO_NAME%，显式加回模板，
           # 配合 ksu_post_setup.sh 的 REPO_NAME := LingLuo 改写，管理器才能显示 @LingLuo 后缀
-          if [ "${{ inputs.ksu_variant }}" == "BakaSU" ]; then
+          if [ "${{ inputs.ksu_variant }}" == "BakaSU" ] && [ "${{ inputs.ksu_mode }}" != "禁用KSU" ]; then
             echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@%REPO_NAME%"' >> "$DEFCONFIG"
           fi
 
@@ -1652,7 +1708,6 @@ jobs:
           CONFIG_KSU_SUSFS_SUS_MOUNT=y
           CONFIG_KSU_SUSFS_SUS_KSTAT=y
           CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-          # CONFIG_KSU_SUSFS_ENABLE_LOG is not set
           CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
           CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
           CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
